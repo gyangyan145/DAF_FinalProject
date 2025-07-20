@@ -1,0 +1,235 @@
+---
+title: "NYPD Shooting Incident Data Analysis"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+
+
+
+install.packages("ggplot2")
+install.packages("janitor")
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(tsibble)
+library(cluster)
+library(factoextra)
+```
+
+## 1. Data load
+This data get from here "https://catalog.data.gov/dataset/nypd-shooting-incident-data-historic"
+```{r}
+data <- read_csv("NYPD_Shooting_Incident_Data__Historic_.csv")
+glimpse(data)
+summary(data)
+```
+
+## 2. Trends in the number of incidents by year
+
+```{r}
+data$OCCUR_DATE <- mdy(data$OCCUR_DATE)
+data$YEAR <- year(data$OCCUR_DATE)
+
+yearly_data <- data %>% 
+  count(YEAR)
+
+ggplot(yearly_data, aes(x = YEAR, y = n)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Yearly Shooting case count", x = "Year", y = "Case")
+```
+
+## 3. Monthly and weekly trends
+
+```{r}
+data$MONTH <- month(data$OCCUR_DATE, label = TRUE)
+data$WEEKDAY <- wday(data$OCCUR_DATE, label = TRUE)
+
+ggplot(data, aes(x = MONTH)) +
+  geom_bar() +
+  labs(title = "Monthly Shooting case count", x = "Month", y = "Case")
+
+ggplot(data, aes(x = WEEKDAY)) +
+  geom_bar() +
+  labs(title = "Weekly Shooting case count", x = "Week", y = "Case")
+```
+
+- Although between 2010-2019 declined, 2020 sharply increased. Recently, it has declined again.
+- Furthermore, incidents tend to increase between May and September, with most occurring 1.5 times on weekends.
+
+
+## 4. Number of incidents by district (BORO)
+
+```{r}
+ggplot(data, aes(x = BORO)) +
+  geom_bar(fill = "steelblue") +
+  labs(title = "BORO Shooting case count", x = "BORO", y = "case") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+- Concentrated in specific locations, there seem to be hotspots.
+
+
+## 5. Analysis about Victime&Perpetrator
+
+```{r}
+valid_age_groups <- c("<18", "18-24", "25-44", "45-64", "65+", "UNKNOWN")
+
+data %>%
+  filter(
+    !is.na(VIC_AGE_GROUP),
+    VIC_AGE_GROUP %in% valid_age_groups  # ← この行が重要
+  ) %>%
+  mutate(VIC_AGE_GROUP = factor(VIC_AGE_GROUP, levels = valid_age_groups)) %>%
+  ggplot(aes(x = VIC_AGE_GROUP)) +
+  geom_bar(fill = "gray30") +
+  labs(title = "Victim age", x = "Age", y = "Case") +
+  theme_minimal()
+
+ggplot(data, aes(x = VIC_SEX, fill = VIC_RACE)) +
+  geom_bar(position = "dodge") +
+  labs(title = "Victim race&sex", x = "Sex", y = "Case")
+
+valid_perp_age_groups <- c("<18", "18-24", "25-44", "45-64", "65+", "UNKNOWN")
+
+data %>%
+  filter(
+    !is.na(PERP_AGE_GROUP),
+    PERP_AGE_GROUP %in% valid_perp_age_groups
+  ) %>%
+  mutate(PERP_AGE_GROUP = factor(PERP_AGE_GROUP, levels = valid_perp_age_groups)) %>%
+  ggplot(aes(x = PERP_AGE_GROUP)) +
+  geom_bar(fill = "gray30") +
+  labs(title = "Perpetrator age", x = "Age", y = "Case") +
+  theme_minimal()
+
+data %>%
+  filter(
+    !is.na(PERP_SEX),
+    !is.na(PERP_RACE),
+    PERP_SEX != "(null)",
+    PERP_RACE != "(null)"
+  ) %>%
+  ggplot(aes(x = PERP_SEX, fill = PERP_RACE)) +
+  geom_bar(position = "dodge") +
+  labs(title = "Perpetrator race & sex", x = "Sex", y = "Case") +
+  theme_minimal()
+```
+
+- Most of the victims were between the ages of 18 and 44, with the majority being black, followed by Hispanic.
+- The perpetrators are of the same age group as the victims, but I think there are many cases where the perpetrators are not identified.
+
+## 6. Clustering analysis (K-means + PCA)
+
+```{r}
+library(dplyr)
+library(factoextra)
+library(ggpubr)
+
+set.seed(123)
+# Data preprocessing and clustering
+clust_data <- data %>%
+  select(VIC_SEX, VIC_AGE_GROUP, VIC_RACE, PERP_SEX, PERP_AGE_GROUP, PERP_RACE) %>%
+  filter(across(everything(), ~ !is.na(.))) %>%
+  mutate(across(everything(), as.factor)) %>%
+  slice_sample(n = 1000)
+
+# One-hot encode + constant sequence removal
+clust_dummy <- model.matrix(~ . - 1, data = clust_data)
+clust_dummy_filtered <- clust_dummy[, apply(clust_dummy, 2, function(x) length(unique(x)) > 1)]
+
+# PCA + K-means
+pca_result <- prcomp(clust_dummy_filtered, 
+                     center = TRUE, 
+                     scale. = TRUE, 
+                     rank. = 2)  # PC1〜2
+
+kmeans_result <- kmeans(pca_result$x[, 1:2], centers = 3)
+
+# Plot
+fviz_cluster(
+  list(data = pca_result$x[, 1:2], cluster = kmeans_result$cluster),
+  geom = "point",
+  main = "K-means Clustering（+ PCA）"
+)
+
+# Estimating the optimal number of clusters using the elbow method
+fviz_nbclust(pca_result$x[, 1:2], kmeans, method = "wss") +
+  labs(title = "the elbow method")
+
+```
+
+- After performing PCA (Component=2), we confirmed the trend using k-mean clustering.
+The elbow method showed that three clusters were most appropriate, and we were able to successfully divide the data into three clusters.
+
+
+## 8. Clustering analysis (K-means + PCA)
+- In order to confirm which categories each cluster corresponds to, we checked the weights of each feature in each axis (PC1, 2) and cluster (n=1-3).
+```{r}
+# 1. Combining one-hot encoded data with clusters
+clust_df <- as.data.frame(clust_dummy_filtered)
+clust_df$cluster <- factor(kmeans_result$cluster)
+
+# 2. Calculate the average (ratio) for each cluster.
+cluster_means <- clust_df %>%
+  group_by(cluster) %>%
+  summarise(across(everything(), mean)) %>%
+  ungroup()
+
+# 3. Convert to tidy format
+cluster_long <- cluster_means %>%
+  pivot_longer(cols = -cluster, names_to = "Feature", values_to = "Proportion")
+
+# 4. Heatmap
+ggplot(cluster_long, aes(x = cluster, y = fct_rev(Feature), fill = Proportion)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sprintf("%.2f", Proportion)), size = 3) +
+  scale_fill_gradient(low = "white", high = "red") +
+  labs(
+    title = "Cluster × feature ratio",
+    x = "cluster", y = "feature", fill = "ratio"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(face = "bold"),
+        axis.text.y = element_text(size = 8))
+
+
+# 1. PCA loading
+loadings <- as.data.frame(pca_result$rotation)
+
+# 2. Convert to tidy format
+loadings_long <- loadings %>%
+  mutate(Feature = rownames(.)) %>%
+  pivot_longer(cols = starts_with("PC"), names_to = "Component", values_to = "Loading")
+
+# 3. Heatmap
+ggplot(loadings_long, aes(x = Component, y = fct_rev(Feature), fill = Loading)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = sprintf("%.2f", Loading)), size = 3) +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0) +
+  labs(
+    title = "The loading in each principal component",
+    x = "PC", y = "feature", fill = "Loading"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(face = "bold"),
+        axis.text.y = element_text(size = 8))
+
+```
+
+- PC1 is the axis that mainly contains information about perpetrators, while PC2 shows a combination of information about victims and perpetrators.
+- ①Cluster 1 consists of cases where the victim is black and the perpetrator is also black.
+- ②Cluster 2 consists of cases where the victim is black&Hispanic and the perpetrator is Black.
+- ③Cluster 3 consists of cases where the victim&perpetrator is Hispanic.
+
+## Conlusion
+
+- There is a clear trend in the months and days of the week when shooting incidents occur most frequently.
+- There are also hot spots where they occur.
+- Clustering reveals patterns in the attributes of victims and perpetrators.As a point for future consideration, I believe it should examine the racial composition of the population in the incident areas and compare it with other regions. 
+
+
+
